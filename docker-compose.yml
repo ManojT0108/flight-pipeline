@@ -1,0 +1,140 @@
+version: '3.8'
+
+# =============================================
+# SHARED CONFIG (YAML anchors for DRY)
+# =============================================
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.8.1-python3.11
+  env_file: .env
+  environment:
+    # MinIO/S3 connection
+    - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+    - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+    - MINIO_ENDPOINT=${MINIO_ENDPOINT}
+    # Project DB connection (passed to DAGs)
+    - FLIGHTS_DB_HOST=${FLIGHTS_DB_HOST}
+    - FLIGHTS_DB_PORT=${FLIGHTS_DB_PORT}
+    - FLIGHTS_DB_NAME=${FLIGHTS_DB_NAME}
+    - FLIGHTS_DB_USER=${FLIGHTS_DB_USER}
+    - FLIGHTS_DB_PASSWORD=${FLIGHTS_DB_PASSWORD}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./scripts:/opt/airflow/scripts
+    - ./plugins:/opt/airflow/plugins
+    - ./logs:/opt/airflow/logs
+    - ./data:/opt/airflow/data
+    - ./great_expectations:/opt/airflow/great_expectations
+    - ./requirements.txt:/requirements.txt
+  depends_on:
+    airflow-db:
+      condition: service_healthy
+    flights-db:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+
+services:
+  # =============================================
+  # DATABASES
+  # =============================================
+  
+  # Airflow metadata DB (internal — Airflow stores its own state here)
+  airflow-db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    ports:
+      - "5434:5432"
+    volumes:
+      - airflow_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Project DB (YOUR data — flights, airports, carriers, etc.)
+  flights-db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ${FLIGHTS_DB_USER}
+      POSTGRES_PASSWORD: ${FLIGHTS_DB_PASSWORD}
+      POSTGRES_DB: ${FLIGHTS_DB_NAME}
+    ports:
+      - "5433:5432"   # 5433 to avoid conflicts with local PostgreSQL
+    volumes:
+      - flights_db_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FLIGHTS_DB_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # =============================================
+  # OBJECT STORAGE (S3-compatible)
+  # =============================================
+  
+  # MinIO — local S3 clone. Same boto3 API as AWS S3.
+  # Develop free locally, deploy to AWS by changing endpoint URL only.
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # =============================================
+  # AIRFLOW (orchestrator)
+  # =============================================
+
+  # Init: runs once on first start — creates admin user, initializes DB
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command: >
+      -c "
+        pip install -r /requirements.txt &&
+        airflow db migrate &&
+        airflow users create \
+          --username admin \
+          --password admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com || true
+      "
+    restart: "no"
+
+  # Webserver: the UI you see at localhost:8080
+  airflow-webserver:
+    <<: *airflow-common
+    command: >
+      bash -c "pip install -r /requirements.txt && airflow webserver --port 8080"
+    ports:
+      - "8080:8080"
+    restart: always
+
+  # Scheduler: triggers DAGs on schedule, manages task execution
+  airflow-scheduler:
+    <<: *airflow-common
+    command: >
+      bash -c "pip install -r /requirements.txt && airflow scheduler"
+    restart: always
+
+volumes:
+  airflow_db_data:
+  flights_db_data:
+  minio_data:

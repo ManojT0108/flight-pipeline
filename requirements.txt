@@ -1,0 +1,22 @@
+# Data processing
+pandas==2.1.4
+numpy==1.26.3
+
+# S3/MinIO client (match Airflow's bundled version)
+boto3==1.33.13
+
+# PostgreSQL
+psycopg2-binary==2.9.9
+# NOTE: Do NOT install sqlalchemy here — Airflow bundles SQLAlchemy <2.0
+# Installing 2.0+ breaks Airflow's ORM completely
+
+# Data validation (pre-load)
+pandera==0.18.0
+multimethod<2.0  # Pandera requires overload function removed in multimethod 2.0
+
+# NOTE: great_expectations removed — pulls in notebook, jupyter, scipy
+# and upgrades SQLAlchemy/tornado which break Airflow.
+# We implement post-load quality checks in pure SQL instead (more portable anyway)
+
+# Utilities
+python-dotenv==1.0.0

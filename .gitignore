@@ -1,0 +1,51 @@
+# Data files (too large for git)
+data/raw/*.csv                                                                
+data/raw/*.dat
+*.csv
+*.dat
+
+# Environment variables (contains secrets)
+.env
+
+# Logs
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Docker volumes (if any local mounts)
+postgres_data/
+minio_data/
+
+# Airflow generated
+airflow.db
+airflow.cfg
+webserver_config.py
+
+# Great Expectations (empty for now)
+great_expectations/uncommitted/
+
+# Temporary files
+*.tmp
+*.temp
+
