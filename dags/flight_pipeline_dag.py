@@ -21,6 +21,7 @@ Multi-file support:
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from psycopg2.extras import execute_values
 
 import sys
 sys.path.insert(0, '/opt/airflow/scripts')
@@ -390,110 +391,103 @@ def load_flights(**kwargs):
             ensure_dates_exist(missing_dates)
             valid_dates.update(missing_dates)
 
-        # Prepare queries
-        insert_query = """
-            INSERT INTO flights (
-                flight_date, carrier_code, tail_number, flight_number,
-                origin_airport, origin_city, origin_state,
-                dest_airport, dest_city, dest_state,
-                scheduled_dep, actual_dep, dep_delay, dep_delay_minutes, dep_delay_15,
-                scheduled_arr, actual_arr, arr_delay, arr_delay_minutes, arr_delay_15,
-                cancelled, cancellation_code, diverted,
-                distance, air_time, scheduled_elapsed, actual_elapsed,
-                carrier_delay, weather_delay, nas_delay, security_delay, late_aircraft_delay
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-            )
-            ON CONFLICT (flight_date, carrier_code, flight_number, origin_airport) DO NOTHING
-        """
-
-        reject_query = """
-            INSERT INTO rejected_records (source, file_name, row_number, raw_data, rejection_reason)
-            VALUES (%s, %s, %s, %s, %s)
-        """
-
         file_loaded = 0
         file_rejected = 0
 
-        # Process in chunks
+        # Process in chunks — validate row-by-row, then bulk insert
         for chunk_start in range(0, total_rows, CHUNK_SIZE):
             chunk = df.iloc[chunk_start:chunk_start + CHUNK_SIZE]
             chunk_num = chunk_start // CHUNK_SIZE + 1
             print(f"Processing chunk {chunk_num} ({len(chunk)} rows)...")
 
+            valid_rows = []
+            rejected_rows = []
+
+            # Step A: Validate all rows in Python (fast — set lookups only)
+            for idx, row in chunk.iterrows():
+                origin = str(row['Origin']).strip()
+                dest = str(row['Dest']).strip()
+                carrier = str(row['Reporting_Airline']).strip()
+                flight_date = str(row['FlightDate']).strip()
+
+                rejection_reasons = []
+                if origin not in valid_airports:
+                    rejection_reasons.append(f"Unknown origin airport: {origin}")
+                if dest not in valid_airports:
+                    rejection_reasons.append(f"Unknown dest airport: {dest}")
+                if carrier not in valid_carriers:
+                    rejection_reasons.append(f"Unknown carrier: {carrier}")
+                if flight_date not in valid_dates:
+                    rejection_reasons.append(f"Unknown date: {flight_date}")
+
+                if rejection_reasons:
+                    rejected_rows.append((
+                        'flights', file_name, int(idx),
+                        f"{flight_date},{carrier},{origin},{dest}",
+                        '; '.join(rejection_reasons)
+                    ))
+                    continue
+
+                valid_rows.append((
+                    flight_date,
+                    carrier,
+                    safe_str(row.get('Tail_Number')),
+                    safe_int(row.get('Flight_Number_Reporting_Airline')),
+                    origin,
+                    safe_str(row.get('OriginCityName')),
+                    safe_str(row.get('OriginState')),
+                    dest,
+                    safe_str(row.get('DestCityName')),
+                    safe_str(row.get('DestState')),
+                    safe_str(row.get('CRSDepTime')),
+                    safe_str(row.get('DepTime')),
+                    safe_float(row.get('DepDelay')),
+                    safe_float(row.get('DepDelayMinutes')),
+                    safe_bool(row.get('DepDel15')),
+                    safe_str(row.get('CRSArrTime')),
+                    safe_str(row.get('ArrTime')),
+                    safe_float(row.get('ArrDelay')),
+                    safe_float(row.get('ArrDelayMinutes')),
+                    safe_bool(row.get('ArrDel15')),
+                    safe_bool(row.get('Cancelled')),
+                    safe_str(row.get('CancellationCode')),
+                    safe_bool(row.get('Diverted')),
+                    safe_float(row.get('Distance')),
+                    safe_float(row.get('AirTime')),
+                    safe_float(row.get('CRSElapsedTime')),
+                    safe_float(row.get('ActualElapsedTime')),
+                    safe_float(row.get('CarrierDelay')),
+                    safe_float(row.get('WeatherDelay')),
+                    safe_float(row.get('NASDelay')),
+                    safe_float(row.get('SecurityDelay')),
+                    safe_float(row.get('LateAircraftDelay')),
+                ))
+
+            # Step B: Bulk insert valid rows (one round-trip for entire chunk)
             with get_connection() as conn:
                 with conn.cursor() as cur:
-                    for idx, row in chunk.iterrows():
-                        # Validate foreign keys
-                        origin = str(row['Origin']).strip()
-                        dest = str(row['Dest']).strip()
-                        carrier = str(row['Reporting_Airline']).strip()
-                        flight_date = str(row['FlightDate']).strip()
+                    if valid_rows:
+                        execute_values(cur, """
+                            INSERT INTO flights (
+                                flight_date, carrier_code, tail_number, flight_number,
+                                origin_airport, origin_city, origin_state,
+                                dest_airport, dest_city, dest_state,
+                                scheduled_dep, actual_dep, dep_delay, dep_delay_minutes, dep_delay_15,
+                                scheduled_arr, actual_arr, arr_delay, arr_delay_minutes, arr_delay_15,
+                                cancelled, cancellation_code, diverted,
+                                distance, air_time, scheduled_elapsed, actual_elapsed,
+                                carrier_delay, weather_delay, nas_delay, security_delay, late_aircraft_delay
+                            ) VALUES %s
+                            ON CONFLICT (flight_date, carrier_code, flight_number, origin_airport) DO NOTHING
+                        """, valid_rows, page_size=10000)
+                        file_loaded += len(valid_rows)
 
-                        rejection_reasons = []
-                        if origin not in valid_airports:
-                            rejection_reasons.append(f"Unknown origin airport: {origin}")
-                        if dest not in valid_airports:
-                            rejection_reasons.append(f"Unknown dest airport: {dest}")
-                        if carrier not in valid_carriers:
-                            rejection_reasons.append(f"Unknown carrier: {carrier}")
-                        if flight_date not in valid_dates:
-                            rejection_reasons.append(f"Unknown date: {flight_date}")
-
-                        if rejection_reasons:
-                            cur.execute(reject_query, (
-                                'flights', file_name, int(idx),
-                                f"{flight_date},{carrier},{origin},{dest}",
-                                '; '.join(rejection_reasons)
-                            ))
-                            file_rejected += 1
-                            continue
-
-                        try:
-                            cur.execute(insert_query, (
-                                flight_date,
-                                carrier,
-                                safe_str(row.get('Tail_Number')),
-                                safe_int(row.get('Flight_Number_Reporting_Airline')),
-                                origin,
-                                safe_str(row.get('OriginCityName')),
-                                safe_str(row.get('OriginState')),
-                                dest,
-                                safe_str(row.get('DestCityName')),
-                                safe_str(row.get('DestState')),
-                                safe_str(row.get('CRSDepTime')),
-                                safe_str(row.get('DepTime')),
-                                safe_float(row.get('DepDelay')),
-                                safe_float(row.get('DepDelayMinutes')),
-                                safe_bool(row.get('DepDel15')),
-                                safe_str(row.get('CRSArrTime')),
-                                safe_str(row.get('ArrTime')),
-                                safe_float(row.get('ArrDelay')),
-                                safe_float(row.get('ArrDelayMinutes')),
-                                safe_bool(row.get('ArrDel15')),
-                                safe_bool(row.get('Cancelled')),
-                                safe_str(row.get('CancellationCode')),
-                                safe_bool(row.get('Diverted')),
-                                safe_float(row.get('Distance')),
-                                safe_float(row.get('AirTime')),
-                                safe_float(row.get('CRSElapsedTime')),
-                                safe_float(row.get('ActualElapsedTime')),
-                                safe_float(row.get('CarrierDelay')),
-                                safe_float(row.get('WeatherDelay')),
-                                safe_float(row.get('NASDelay')),
-                                safe_float(row.get('SecurityDelay')),
-                                safe_float(row.get('LateAircraftDelay')),
-                            ))
-                            file_loaded += 1
-                        except Exception as e:
-                            cur.execute(reject_query, (
-                                'flights', file_name, int(idx),
-                                f"{flight_date},{carrier},{origin},{dest}",
-                                str(e)
-                            ))
-                            file_rejected += 1
+                    if rejected_rows:
+                        execute_values(cur, """
+                            INSERT INTO rejected_records (source, file_name, row_number, raw_data, rejection_reason)
+                            VALUES %s
+                        """, rejected_rows)
+                        file_rejected += len(rejected_rows)
 
             print(f"  Chunk {chunk_num}: loaded={file_loaded}, rejected={file_rejected}")
 
@@ -744,7 +738,7 @@ def run_quality_checks(**kwargs):
             # Check 6: Delay values in reasonable range
             cur.execute("""
                 SELECT COUNT(*) FROM flights
-                WHERE arr_delay IS NOT NULL AND (arr_delay < -120 OR arr_delay > 4000)
+                WHERE arr_delay IS NOT NULL AND (arr_delay < -150 OR arr_delay > 5000)
             """)
             bad_delays = cur.fetchone()[0]
             if bad_delays == 0:

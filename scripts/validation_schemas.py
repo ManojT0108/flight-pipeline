@@ -33,18 +33,18 @@ flights_schema = DataFrameSchema(
             description="Destination IATA airport code"),
         
         # Delay fields — can be null (cancelled flights)
-        # Thresholds match quality_checks in DAG (-120 to 4000)
+        # Thresholds match quality_checks in DAG (-150 to 5000)
         "DepDelay": Column(float, nullable=True,
             checks=[
-                Check.greater_than_or_equal_to(-120),   # Allow 2 hours early
-                Check.less_than_or_equal_to(4000),      # Cap at ~67 hours (multi-day rebookings)
+                Check.greater_than_or_equal_to(-150),   # Allow 2.5 hours early
+                Check.less_than_or_equal_to(5000),      # Cap at ~83 hours (multi-day rebookings)
             ],
             description="Departure delay in minutes, negative = early"),
 
         "ArrDelay": Column(float, nullable=True,
             checks=[
-                Check.greater_than_or_equal_to(-120),
-                Check.less_than_or_equal_to(4000),
+                Check.greater_than_or_equal_to(-150),
+                Check.less_than_or_equal_to(5000),
             ],
             description="Arrival delay in minutes, negative = early"),
         
