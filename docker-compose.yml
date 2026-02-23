@@ -74,6 +74,29 @@ services:
       retries: 5
 
   # =============================================
+  # READ REPLICA (uncomment to enable)
+  # =============================================
+  # Setup: Configure streaming replication from flights-db.
+  # Then set FLIGHTS_DB_REPLICA_HOST=flights-db-replica in api service.
+  #
+  # flights-db-replica:
+  #   image: postgres:15
+  #   environment:
+  #     POSTGRES_USER: ${FLIGHTS_DB_USER}
+  #     POSTGRES_PASSWORD: ${FLIGHTS_DB_PASSWORD}
+  #     POSTGRES_DB: ${FLIGHTS_DB_NAME}
+  #   ports:
+  #     - "5435:5432"
+  #   depends_on:
+  #     flights-db:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U ${FLIGHTS_DB_USER}"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 5
+
+  # =============================================
   # OBJECT STORAGE (S3-compatible)
   # =============================================
   
@@ -95,6 +118,70 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # =============================================
+  # REDIS (caching for API)
+  # =============================================
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"   # 6380 to avoid conflict with local Redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # =============================================
+  # PGBOUNCER (connection pooler)
+  # =============================================
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    environment:
+      - DATABASE_URL=postgres://${FLIGHTS_DB_USER}:${FLIGHTS_DB_PASSWORD}@flights-db:5432/${FLIGHTS_DB_NAME}
+      - POOL_MODE=transaction
+      - MAX_CLIENT_CONN=100
+      - DEFAULT_POOL_SIZE=20
+      - AUTH_TYPE=scram-sha-256
+    ports:
+      - "6432:5432"
+    depends_on:
+      flights-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 5432"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # =============================================
+  # FASTAPI (backend API service)
+  # =============================================
+
+  api:
+    build: ./api
+    ports:
+      - "8000:8000"
+    environment:
+      - FLIGHTS_DB_HOST=pgbouncer
+      - FLIGHTS_DB_PORT=5432
+      - FLIGHTS_DB_NAME=${FLIGHTS_DB_NAME}
+      - FLIGHTS_DB_USER=${FLIGHTS_DB_USER}
+      - FLIGHTS_DB_PASSWORD=${FLIGHTS_DB_PASSWORD}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - JWT_SECRET=flight-pipeline-jwt-secret-2025
+      - API_KEY=flight-pipeline-demo-key-2025
+      - ADMIN_API_KEY=flight-pipeline-admin-key-2025
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: always
 
   # =============================================
   # AIRFLOW (orchestrator)
