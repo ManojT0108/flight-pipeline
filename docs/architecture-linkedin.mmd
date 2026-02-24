@@ -1,0 +1,67 @@
+%% Paste this file into https://mermaid.live and export as SVG, then PNG (1920x1080)
+flowchart LR
+    T["Flight Data Platform Architecture"]
+
+    BTS["BTS Flights<br/>CSV files"]
+    OF["OpenFlights<br/>airports.dat"]
+    IEM["IEM ASOS API<br/>weather observations"]
+
+    S3["MinIO / S3<br/>Landing Zone"]
+    AF["Airflow DAG<br/>Orchestration + Retries"]
+
+    subgraph WH["PostgreSQL Warehouse"]
+        direction TB
+        DIMS["Dimension Tables<br/>carriers • airports • date_dim"]
+        FACTS["Fact Tables<br/>flights • weather_observations • weather_hourly"]
+        META["Metadata Tables<br/>pipeline_runs • rejected_records"]
+    end
+
+    API["FastAPI Analytics Service"]
+    AUTH["JWT Auth + Role Access"]
+    CACHE["Redis Cache + Rate Limiting"]
+    REST["REST Endpoints<br/>carriers • routes • delays • weather • airports"]
+
+    USER["Dashboard / Analyst / PM"]
+    AGENT["LangGraph Agent"]
+    TOOLS["9 SQL Tools"]
+
+    T --- BTS
+    T --- OF
+    T --- IEM
+
+    BTS --> S3
+    OF --> S3
+    S3 --> AF
+    IEM --> AF
+
+    AF --> DIMS
+    AF --> FACTS
+    AF --> META
+
+    DIMS --> API
+    FACTS --> API
+    META --> API
+
+    API --> AUTH
+    API --> CACHE
+    API --> REST
+
+    USER --> REST
+    USER --> AGENT
+    AGENT --> TOOLS
+    TOOLS --> FACTS
+    TOOLS --> DIMS
+
+    classDef title fill:#FFFFFF,stroke:#FFFFFF,color:#111827,font-size:28px,font-weight:bold;
+    classDef source fill:#E8F1FF,stroke:#2F6FEB,stroke-width:1.5,color:#0B1F3A;
+    classDef ingest fill:#EAFBF3,stroke:#1F9D67,stroke-width:1.5,color:#0E2A1E;
+    classDef warehouse fill:#FFF6E8,stroke:#C67A00,stroke-width:1.5,color:#3A2600;
+    classDef app fill:#F3EEFF,stroke:#6A42C2,stroke-width:1.5,color:#26124D;
+    classDef user fill:#F8FAFC,stroke:#64748B,stroke-width:1.2,color:#111827;
+
+    class T title;
+    class BTS,OF,IEM source;
+    class S3,AF ingest;
+    class DIMS,FACTS,META warehouse;
+    class API,AUTH,CACHE,REST,AGENT,TOOLS app;
+    class USER user;

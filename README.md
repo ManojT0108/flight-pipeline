@@ -1,101 +1,97 @@
-# Flight Data ETL Pipeline
+# Flight Data Platform
 
-End-to-end data pipeline that ingests US flight performance data from the Bureau of Transportation Statistics (BTS) and airport reference data from OpenFlights, transforms and validates the data, and loads it into a normalized PostgreSQL data warehouse.
+End-to-end platform built in three layers:
+
+1. Data pipeline (Airflow + MinIO + PostgreSQL)
+2. Analytics API (FastAPI + Redis + JWT)
+3. Conversational analytics (LangGraph + Claude + SQL tools)
+
+The system processes US flight and weather data, serves 22 analytics endpoints, and supports natural-language questions grounded in database queries.
 
 ## Architecture
 
-```
-┌─────────────┐     ┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│  BTS CSV     │────▶│   MinIO     │────▶│   Airflow    │────▶│ PostgreSQL  │
-│  (flights)   │     │   (S3)      │     │   (DAGs)     │     │  (warehouse)│
-├─────────────┤     │             │     │              │     │             │
-│ OpenFlights  │────▶│  Raw data   │     │  Extract     │     │ carriers    │
-│  (airports)  │     │  landing    │     │  Validate    │     │ airports    │
-└─────────────┘     │  zone       │     │  Transform   │     │ date_dim    │
-                    └─────────────┘     │  Load        │     │ flights     │
-                                        └──────────────┘     └─────────────┘
-```
+Architecture diagram:
+
+![Flight Data Platform Architecture](docs/architecture-diagram.png)
+
+Source used to generate the publish-ready visual: [docs/architecture-linkedin.mmd](docs/architecture-linkedin.mmd).
 
 ## Tech Stack
 
 | Component | Tool | Purpose |
 |-----------|------|---------|
-| Orchestration | Apache Airflow | DAG-based workflow scheduling, retries, monitoring |
-| Storage | MinIO (S3-compatible) | Raw data landing zone, same API as AWS S3 |
-| Database | PostgreSQL | Normalized data warehouse with star schema |
-| Validation | Pandera | Pre-load schema validation (types, ranges, constraints) |
-| Quality | Great Expectations | Post-load data quality checks (FK integrity, stats) |
-| Containers | Docker Compose | Local dev environment matching production topology |
+| Orchestration | Apache Airflow | DAG scheduling, retries, failure isolation |
+| Storage | MinIO (S3-compatible) | Raw landing zone for idempotent ingest |
+| Warehouse | PostgreSQL | Dim/fact schema, indexes, metadata tracking |
+| Validation | Pandera + SQL checks | Pre-load schema checks + post-load quality checks |
+| API | FastAPI | Analytics endpoints for carriers/routes/delays/weather/airports |
+| Performance | Redis + PgBouncer | Caching, rate limiting, connection pooling |
+| Agent | LangGraph + Claude | Tool-calling ReAct loop over SQL-backed analytics |
+| Infra | Docker Compose | Local multi-service environment |
 
 ## Data Sources
 
-1. **BTS On-Time Performance** — Every US domestic flight with departure/arrival times, delays, cancellations
-2. **OpenFlights** — Airport reference data with IATA codes, coordinates, timezones
+1. BTS On-Time Performance (US domestic flights)
+2. OpenFlights airport reference data
+3. Iowa Environmental Mesonet (IEM) ASOS weather observations
 
-## Pipeline Stages
+## Pipeline DAG
 
-```
-upload_raw_to_s3 → load_airports → [extract_carriers, generate_date_dim] → load_flights → quality_checks
-```
+`upload_raw_to_s3 -> load_airports -> [extract_carriers, generate_date_dim] -> load_flights -> load_weather -> quality_checks`
 
-1. **Upload**: Raw files → MinIO (S3 landing zone)
-2. **Airports**: Load dimension table from OpenFlights
-3. **Carriers + Dates**: Extract carriers from flight data, generate date dimension (parallel)
-4. **Flights**: Load fact table with FK validation, chunked processing, rejected record logging
-5. **Quality**: Post-load integrity checks, summary statistics
+Key pipeline behavior:
+
+- Multi-file ingestion from `data/raw`
+- Idempotent inserts via `ON CONFLICT`
+- Rejection audit trail in `rejected_records`
+- Run-level tracking in `pipeline_runs`
+- Chunked bulk inserts for scale
+
+## API Capabilities
+
+- 22 endpoints across pipeline, carriers, delays, routes, weather, airports, auth, and chat
+- JWT-based auth with role checks for admin routes
+- Cached analytics responses with selective invalidation
+- Offset and cursor pagination for high-cardinality endpoints
+- Read-replica-ready query helpers
+
+## LangGraph Agent
+
+- 9 tool functions mapped to analytics domains (carriers, routes, delays, weather, airports, system health)
+- Tools call PostgreSQL directly through shared query helpers (no HTTP self-calls)
+- Deterministic, traceable answers backed by SQL results
 
 ## Quick Start
 
 ```bash
-# 1. Clone and enter project
-cd flight-pipeline
-
-# 2. Place raw data files
-cp your_flights.csv data/raw/flights.csv
-cp airports.dat data/raw/airports.dat
-
-# 3. Start all services
+# 1) Start services
 docker-compose up -d
 
-# 4. Wait for init to complete (~60 seconds)
+# 2) Wait for airflow init
 docker-compose logs -f airflow-init
 
-# 5. Open Airflow UI
-open http://localhost:8080
-# Login: admin / admin
+# 3) Trigger DAG in Airflow UI
+# http://localhost:8080 (admin/admin)
 
-# 6. Trigger the pipeline
-# Click on 'flight_data_pipeline' → Trigger DAG
-
-# 7. Monitor progress in Airflow UI
-# Or check PostgreSQL directly:
-psql -h localhost -p 5433 -U flights_user -d flights
+# 4) API docs
+# http://localhost:8000/docs
 ```
 
-## Project Structure
+## Testing
 
+```bash
+pytest -q
 ```
+
+## Repo Layout
+
+```text
 flight-pipeline/
-├── dags/
-│   └── flight_pipeline_dag.py    # Main DAG definition
-├── scripts/
-│   ├── init_db.sql               # Database schema
-│   ├── db_helper.py              # PostgreSQL connection helper
-│   ├── s3_helper.py              # MinIO/S3 helper
-│   └── validation_schemas.py     # Pandera validation schemas
-├── data/
-│   └── raw/                      # Place raw CSV files here
-├── great_expectations/           # GE configuration (Phase 2)
+├── dags/                    # Airflow DAG
+├── scripts/                 # ETL/db/weather helpers + schema
+├── api/                     # FastAPI app + LangGraph agent
+├── tests/                   # Unit/integration-style API and agent tests
+├── docs/                    # Architecture diagram source
 ├── docker-compose.yml
-├── requirements.txt
-├── .env
 └── README.md
 ```
-
-## Key Design Decisions
-
-- **Idempotent loads**: All INSERT statements use ON CONFLICT — safe to rerun without duplicates
-- **FK validation**: Flights referencing unknown airports/carriers go to rejected_records table
-- **Chunked processing**: 50K rows per batch to limit memory usage
-- **Audit trail**: pipeline_runs and rejected_records tables track every load
-- **Separated concerns**: Airflow metadata DB separate from project DB
